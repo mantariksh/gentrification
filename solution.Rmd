@@ -1,0 +1,518 @@
+---
+title: "Gentrification"
+author: "Your Name"
+date: 2018-
+output: 
+  html_document:
+    toc: true
+    toc_depth: 6
+---
+
+```{r include = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE, warning=FALSE}
+# Libraries
+library(tidyverse)
+library(sf)
+library(lubridate)
+library(leaflet)
+if (!require(leaflet.extras)) {
+  devtools::install_github('bhaskarvk/leaflet.extras')
+  library(leaflet.extras)
+}
+library(compare)
+
+# Parameters
+  # File where generated answers are saved, by default in the home directory
+file_answers <- "../data/answers.rds"
+  # File containing UDP data
+file_udp <- "../data/cci_rews_data_2015-08-21 with amenity data.xlsx"
+  # File only containing typology of each tract
+file_typologies <- "../data/udp_2017results.csv"
+  # Typology map colors
+typology_colors <- 
+  c(
+    "LI - At Risk of Gentrification and/or Displacement" = "#c3c4df",
+    "LI - Not Losing Low Income Households"              = "#e1dfee",
+    "LI - Ongoing Gentrification and/or Displacement"    = "#a598c7",
+    "MHI - Advanced Exclusion"                           = "#e9a58a",
+    "MHI - Advanced Gentrification"                      = "#736a8a",
+    "MHI - At Risk of Exclusion"                         = "#fcd9b8",
+    "MHI - Not Losing Low Income Households"             = "#fef6ec",
+    "MHI - Ongoing Exclusion"                            = "#fdbb95",
+    "College town"                                       = "gray",
+    "Data Unavailable or Unreliable"                     = "gray"
+  )
+  # WGS-84 projection for San Francisco
+WGS84 <- "+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs"
+  # Redlining map colors
+redlining_colors <- 
+  c(
+    "A" = "green",
+    "B" = "blue",
+    "C" = "yellow",
+    "D" = "red"
+  )
+  # File for construction pipeline in SF
+file_pipeline <- "../data/pipeline_data.rds"
+  # Save answers
+SAVE_ANSWERS <- TRUE
+  # File for tract geographies
+file_tracts <- "../data/14000.shp"
+  # File for redlining geographies
+file_redlining <- "../data/HOLC_SanFrancisco.shp"
+
+```
+
+The [Urban Displacement Project](http://www.urbandisplacement.org/) (UDP) is a 
+collaborative research initiative by UC Berkeley, UCLA, and Portland State 
+University. Its aim is to understand the nature of gentrification and 
+displacement in American cities, and one of its major areas of focus is San 
+Francisco.  
+
+UDP has published a list of gentrification "typologies". This is a framework by 
+which census tracts can be classified according to the extent of gentrification
+and exclusion taking place within them. Note that gentrification refers to 
+demographic shifts in historically disinvested neighborhoods, often 
+corresponding to the displacement of low-income residents, whereas exclusion 
+refers to increasing barriers for low-income residents to move into an area.  
+
+UDP's map of San Francisco, colored by typology, is available [here](http://www.urbandisplacement.org/map/sf). The first task in this 
+challenge is to recreate this map.  
+
+First, we need to get the shapes of the census tracts. From the [ACS data website](https://factfinder.census.gov/faces/nav/jsf/pages/searchresults.xhtml?refresh=t), download the shapefile for census tracts as follows:  
+
+1.  Select the "Census Tract - 140" geography for all census tracts in 
+California  
+2.  Select dataset ID S0101 (Age and Sex)  
+3.  Select "Create a Map" and make a map of the variable "Total population"  
+4.  Download the shapefiles and transfer all of them into your data directory. 
+
+Note that when calling `read_sf()`, you should read in the .shp file.  
+
+__q1.1__ `file_typologies` contains the typology of some census tracts in the 
+Bay Area under the column `Typology`, while `file_udp_data` contains the 
+typologies under the column `disp_descr` as well as several other variables used
+to create the typologies. Both files are raw data obtained from the UDP 
+researchers. Note that `file_udp_data` contains data on fewer census tracts than
+`file_typologies`.
+
+Use `count` to look at the typology results in both files. What major 
+differences do you notice?
+
+Read in both files so we can compare them.
+
+```{r}
+udp_data <- 
+  file_udp %>% 
+  readxl::read_excel(sheet = "data")
+typologies <- 
+  file_typologies %>% 
+  read_csv() %>% 
+  select(geo_fips, Typology)
+```
+
+Compare the tract IDs in both.
+
+```{r}
+nrow(typologies) - nrow(udp_data)
+```
+
+`typologies` contains data on 551 more census tracts than `udp_data`.
+
+```{r}
+setdiff(
+  udp_data %>% pull(tract_id),
+  typologies %>% pull(geo_fips)
+)
+```
+
+All the tract IDs that are in `udp_data` are also in `typologies`.
+
+
+```{r}
+udp_data %>% 
+  select(tract_id, disp_descr) %>% 
+  count(disp_descr)
+```
+
+```{r}
+typologies %>% 
+  count(Typology)
+```
+
+Doing a count for both files, it is clear that the terminology used in both is
+not consistent. `typologies` makes a distinction between gentrification and
+exclusion, while `udp_data` makes no such distinction, and seems to only make
+distinctions by extent of gentrification and income. This is seen from the fact
+that `udp_data` contains categories for "Undergoing displacement" for both
+low income and moderate-to-high income.  
+
+__q1.2__ `file_typologies` contains typology results that are more consistent
+with the map we are trying to recreate, so we will use it for mapping. However,
+`file_typologies` has no way to filter the tracts by city, so we have to use the
+filtered census tract IDs in `file_udp_data` to determine which tracts to map.
+Join the typologies data with the geographies you just downloaded, and use the 
+color values in `typology_colors` to recreate the UDP map for the city of San
+Francisco. What conclusions can you draw?  
+
+Note that your map will look a little different from the original, partially
+because the original uses base maps, and partially because the original uses
+striped colors for "Advanced Gentrification" that are hard to recreate in R.  
+
+Hints:  
+
+* Make sure to use `st_transform` with the WGS84 projection defined above.
+* Use [this website](http://www.usboundary.com/Areas/) on census tract
+boundaries to find out which tract you could filter out to better focus on the
+main peninsula, rather than the offshore islands.
+
+```{r}
+tracts <- 
+  file_tracts %>% 
+  read_sf() %>% 
+  mutate(
+    GEO_ID = 
+      str_remove(GEO_ID, "\\d+US") %>% 
+      as.double()
+  ) %>% 
+  st_transform(crs = WGS84)
+```
+```{r, fig.asp=1}
+udp_data %>% 
+  filter(city == "San Francisco") %>% 
+  select(tract_id) %>% 
+  filter(tract_id != 6075017902) %>% 
+  left_join(typologies, by = c("tract_id" = "geo_fips")) %>% 
+  left_join(tracts, by = c("tract_id" = "GEO_ID")) %>% 
+  ggplot(aes(fill = Typology)) +
+  geom_sf(size = 0.1, color = "white") + 
+  scale_fill_manual(values = typology_colors) +
+  coord_sf(datum = NA) +
+  guides(
+    fill = 
+      guide_legend(
+        title.position = "top",
+        ncol = 2
+      )
+  ) +
+  theme_void() +
+  theme(
+    legend.position = "bottom",
+    legend.text = element_text(size = 8)
+  ) +
+  labs(
+    title = "San Francisco census tracts by gentrification typology",
+    caption = "Source: Urban Displacement Project"
+  )
+# Print results
+if (exists("q1.2")) q1.2
+
+# Compare result with answer
+if (exists("q1.2")) knitr::include_graphics("data/q1_2.png")
+```
+The areas being gentrified and the areas under exclusion tend to cluster 
+together. Moreover, even within the clusters of tracts being gentrified, 
+those which are advanced tend to cluster together. Since all the gentrification
+typologies are low-income except "Advanced Gentrification", this suggests that
+there are high-income pockets clustered together amongst low-income gentrifying
+pockets.  
+
+__q2__ Gentrification and exclusion are deeply rooted in historical state 
+policies. In this question, we explore the history of redlining, where certain
+areas were identified by the state as less worth of investment because they
+contained high proportions of minority populations.  
+
+The [Mapping Inequality Project](https://dsl.richmond.edu/panorama/redlining/#loc=4/36.71/-96.93&opacity=0.8) at the University of Richmond has made shapefiles available which 
+identify exactly how areas were redlined in the past. Download the shapefiles 
+for San Francisco (use the cloud icon next to the label "San Francisco, CA")
+and add them to your data directory.  
+
+Overlay the redlining data from the mapping inequality project with the plot
+you created in q1.2. What conclusions can you draw?
+
+Hints:  
+
+* Again, remember to use `st_transform` to make the projections of the two
+shapefiles consistent.  
+* Use `alpha` to make the colors more clear in the overlay.  
+* Note that `ggplot` does not allow multiple legends for the same aesthetic.
+Think of ways in which you can separate the legends for the redlining zones
+and the gentrification typologies!  
+
+```{r}
+redlining <- 
+  file_redlining %>% 
+  read_sf() %>% 
+  st_transform(crs = WGS84)
+```
+```{r, fig.asp=1}
+udp_data %>% 
+  filter(city == "San Francisco") %>% 
+  select(tract_id) %>% 
+  filter(tract_id != 6075017902) %>% 
+  left_join(typologies, by = c("tract_id" = "geo_fips")) %>% 
+  left_join(tracts, by = c("tract_id" = "GEO_ID")) %>% 
+  ggplot(aes(fill = Typology)) +
+  geom_sf(size = 0.1, color = "white", alpha = 0.8) + 
+  geom_sf(
+    aes(fill = holc_grade),
+    data = redlining,
+    inherit.aes = FALSE,
+    alpha = 0.3
+  ) +
+  scale_fill_manual(
+    breaks = 
+      c(
+        redlining_colors %>% names(),
+        typology_colors %>% names()
+      ),
+    values = c(typology_colors, redlining_colors)
+  ) +
+  guides(
+    fill = 
+      guide_legend(
+        title.position = "top",
+        ncol = 4
+      )
+  ) +
+  coord_sf(datum = NA) +
+  theme_void() +
+  theme(
+    legend.position = "bottom",
+    legend.title = element_text(size = 8),
+    legend.text = element_text(size = 6)
+  ) +
+  labs(
+    title = "San Francisco census tracts by gentrification typology",
+    subtitle = 
+      "Overlay shows close correlation with HOLC redlining grade from 1930s",
+    fill = "Grade   Typology",
+    caption = "Source: Urban Displacement Project and University of Richmond"
+  )
+# Print results
+if (exists("q2")) q2
+
+# Compare result with answer
+if (exists("q2")) knitr::include_graphics("data/q2.png")
+
+```
+
+
+In general, the areas being gentrified correspond closely to the areas that
+got the lowest HOLC grade, while the areas under exclusion correspond to higher
+HOLC grades. The policies of the 1930s-1940s thus clearly had a close 
+correlation with housing inequality today.
+
+There are some exceptions: in the east of the city, there is a tract that is
+classified as under exclusion but was redlining grade "D", whereas in the west,
+there is a tract that is undergoing advanced gentrification and was redlining
+grade "B". This suggests that there are probably pockets of the city whose
+income demographics have changed significantly since the 1930s and 1940s.
+
+__q3.1__ Next, we will try to understand how current patterns of housing
+construction relate to housing inequality.  
+
+Every quarter, the San Francisco Planning Department releases a "Development
+Pipeline" document which lists all the current construction projects in the 
+city. This document includes the total number of units being constructed, as 
+well as how many of those units constitute affordable housing.  
+
+The data for every quarter from 2013-2017 has been downloaded, cleaned, and 
+stored for you in `file_pipeline`. However, the `coordinates` column must be
+converted into a geometrical object before we can map the data.  
+
+Read in the data, and use the `st_as_sf` function to convert the coordinates 
+into simple geometrical objects.  
+
+Hints:  
+
+* The coordinates column is in the format (latitude, longitude). Use `separate` 
+and `str_extract` to get those numbers as separate columns.  
+* `st_as_sf` takes a `coords` argument in the form (longitude, latitude). You
+can filter for rows that have non-NA values for both coordinates.
+
+```{r}
+q3.1 <- 
+  file_pipeline %>% 
+  read_rds() %>% 
+  separate(col = coords, into = c("lat", "lng"), sep = ",\\s*") %>% 
+  mutate(
+    lat = str_extract(lat, "-?\\d+.?\\d*") %>% as.numeric(),
+    lng = str_extract(lng, "-?\\d+.?\\d*") %>% as.numeric()
+  ) %>% 
+  filter_at(
+    vars(lat, lng),
+    all_vars(!is.na(.))
+  ) %>%
+  st_as_sf(coords = c("lng", "lat"))
+# Print results
+if (exists("q3.1")) q3.1
+```
+
+__q3.2__ Plot the net units built (`net_units`) and net affordable units built
+(`net_aff_units`) on an annual basis on the same axes. What conclusions can you
+draw?
+```{r}
+q3.1 %>% 
+  mutate(year = year(date)) %>% 
+  group_by(year) %>% 
+  summarize(
+    net_units = sum(net_units, na.rm = TRUE),
+    net_aff_units = sum(net_aff_units, na.rm = TRUE)
+  ) %>% 
+  gather(ends_with("units"), key = type, value = num_units, na.rm = TRUE) %>% 
+  mutate(
+    type = 
+      factor(
+        type, 
+        levels = c("net_units", "net_aff_units"), 
+        labels = c("Overall", "Affordable")
+      )
+  ) %>% 
+  ggplot(aes(year, num_units, color = type)) +
+  geom_point() +
+  geom_line()
+```
+
+The total construction was always much greater than the number of affordable
+units built. Moreover, the affordable unit construction did not keep pace with
+overall construction: when overall construction started increasing in 2008,
+affordable unit construction lagged behind by several years.
+
+There was a dip in construction in 2012, probably due to housing market prices.
+
+
+__q3.3__ Make a heatmap of the net affordable units built in the year 2010, then
+make another one for the year 2016. Compare these to your map in q1.2. What
+conclusions can you draw? How might the gentrification typologies have been
+useful to construction planners back in 2010?
+
+```{r}
+q3.1 %>% 
+  mutate(year = year(date)) %>% 
+  filter(year == 2010) %>% 
+  leaflet() %>% 
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addHeatmap(
+    intensity = ~ net_aff_units,
+    radius = 20
+  )
+```
+
+```{r}
+q3.1 %>% 
+  mutate(year = year(date)) %>% 
+  filter(year == 2016) %>% 
+  leaflet() %>% 
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addHeatmap(
+    intensity = ~ net_aff_units,
+    radius = 20
+  )
+```
+
+In 2010, construction of affordable units was really only focused on Bayview, 
+a known low-income and underinvested area. However, in 2016, the 
+construction of affordable housing has spread out to areas that very closely 
+match the gentrifying areas seen in q1. If construction planners had known about
+gentrification typologies sooner, perhaps they could have encouraged more 
+affordable unit construction in gentrifying areas to reduce the negative
+effects of displacement.
+
+__q4__ `file_udp` contains several variables other than the gentrification
+typologies, which are described under the "_documentation" tab. Explore this 
+data. What conclusions can you draw?  
+
+Hints:  
+
+* If you're having trouble looking for a place to start, think about who the
+gentrifiers could be. Are they of a particular race, or income, or educational
+attainment level? How can you tell, perhaps by comparison to earlier plots?  
+* If you are planning to map multiple variables, consider writing a helper 
+function.  
+
+```{r}
+plot_across_years <- 
+  function(start_year_var, end_year_var, start_year, end_year) {
+    udp_data %>% 
+      filter(city == "San Francisco") %>% 
+      filter(tract_id != 6075017902) %>% 
+      select(tract_id, !! enquo(start_year_var), !! enquo(end_year_var)) %>% 
+      gather(key = year, value = value, start_year_var, end_year_var) %>% 
+      mutate(
+        year =
+          case_when(
+            year == start_year_var ~ start_year,
+            year == end_year_var ~ end_year
+          )
+      ) %>% 
+      left_join(tracts, by = c("tract_id" = "GEO_ID")) %>% 
+      ggplot(aes(fill = value)) +
+      geom_sf(size = 0.1, color = "white") + 
+      coord_sf(datum = NA) +
+      scale_fill_continuous(
+        labels = scales::percent
+      ) +
+      guides(
+        fill =
+          guide_colorbar(
+            title.hjust = 0.5,
+            title.position = "top",
+            barwidth = 20
+          )
+      ) +
+      theme_void() +
+      theme(
+        legend.position = "bottom",
+        legend.text = element_text(size = 8)
+      ) +
+      facet_grid(. ~ year) +
+      labs(
+        caption = "Source: Urban Displacement Project"
+      )
+  }
+```
+
+
+```{r, fig.asp=1}
+plot_across_years("white_90", "white_13", "1990", "2009-2013") +
+  labs(
+    title = "Census tracts in San Francisco by % non-white population",
+    fill = "% non-white population"
+  )
+```
+
+Surprisingly, the percentage of non-white people in each census tract does not
+seem to have changed much in San Francisco since 1990. However, we can see that
+in the eastern part of the city which is being gentrified, the non-white
+percentage has decreased slightly. It is possible that this indicates that the gentrifiers are not necessarily white, but simply people with higher income. We
+can test this using the percentage of college-educated adults.
+
+```{r, fig.asp=1}
+plot_across_years("ed90_00", "ed00_13", "1990-2000", "2000-2013") +
+  scale_fill_gradient2() +
+  labs(
+    title = 
+      "Census tracts in San Francisco by % change in college-educated adults",
+    fill = "% change in college-educated adults"
+  )
+```
+In almost all areas of the city, there has been a positive change in the
+percentage of college-educated adults, which is perhaps a reflection of better
+educational attainment overall. However, the map for 2000-2013 shows that this percentage has increased even more in some areas that are being gentrified. This
+could mean that the gentrifiers are more highly-educated people moving into lower-income districts.
+Save answers.
+
+```{r, eval=TRUE}
+if (SAVE_ANSWERS) {
+  ls(pattern = "^q[1-9][0-9]*(\\.[1-9][0-9]*)*$") %>%
+  str_sort(numeric = TRUE) %>% 
+  set_names() %>% 
+  map(get) %>%
+  discard(is.ggplot) %>%
+  write_rds(file_answers)
+}
+```
